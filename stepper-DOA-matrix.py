@@ -2,15 +2,14 @@ import usb.core
 import usb.util
 import time
 import RPi.GPIO as GPIO
-import pyaudio
 import numpy as np
+import pyaudio
+from threading import Thread
 from tuning import Tuning
-from time import sleep
-import threading
 from luma.led_matrix.device import max7219
 from luma.core.interface.serial import spi, noop
 from luma.core.legacy import show_message
-from luma.core.legacy.font import proportional, CP437_FONT, LCD_FONT
+from luma.core.legacy.font import proportional, CP437_FONT
 
 
 # Pin configuration
@@ -47,7 +46,7 @@ chunk = 24000  # Chunk size (1.5 seconds)
 overlap = 18000  # 75% overlap (1.125 seconds overlap)
 channels = 1  # Mono audio
 format = pyaudio.paInt16
-THRESHOLD = 0.1  # Threshold for noise detection
+THRESHOLD = 10 # Volume threshold for noise detection
 
 # Open the audio stream
 stream = p.open(format=format,
@@ -58,46 +57,81 @@ stream = p.open(format=format,
 
 # Function to calculate volume from raw audio data
 def calculate_volume(data):
-    audio_data = np.frombuffer(data, dtype=np.int16)
-    volume = np.sqrt(np.mean(audio_data**2))  # Root mean square (RMS) method for volume
-    return volume
+    try:
+        # Ensure data is in the expected format
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        
+        if len(audio_data) == 0:
+            raise ValueError("Audio data is empty.")
 
-def hello_world(msg):
-    # Non-blocking LED message display for noise detection
+        # Root mean square (RMS) method for volume
+        volume = np.sqrt(np.mean(audio_data**2))
+
+        # Prevent invalid values from being returned
+        if np.isnan(volume) or volume < 0:
+            return 0.0
+
+        return volume
+    except Exception as e:
+        print(f"Error calculating volume: {e}")
+        return 0.0
+
+# Function to show the message on the LED matrix
+def led_print(msg):
     print(msg)
-    show_message(device, msg, fill="white", font=proportional(CP437_FONT), scroll_delay=0.1)
-    # time.sleep(1)
+    device.clear()  # Clear the screen before showing the message
+    show_message(device, msg, fill="white", font=proportional(CP437_FONT), scroll_delay=0.01)  # No scrolling
+    # Wait for a short time before clearing the message (e.g., 1 second)
+    time.sleep(1)
+    device.clear()  # Clear the screen after the message is displayed
 
-def display_message(msg):
-    # This function runs in a separate thread to display the message without blocking
-    threading.Thread(target=hello_world, args=(msg,)).start()
-
-# Track audio direction and point motor
-try:
-    current_angle = 0  # Track the motor's position
+# Function to detect loud audio and trigger message display
+def audio_processing_thread():
     while True:
-        direction = Mic_tuning.direction
         audio_data = stream.read(chunk, exception_on_overflow=False)
         volume = calculate_volume(audio_data)
 
         # Check if the noise is loud enough to trigger a message
-        if volume > THRESHOLD:  # Define a threshold for loud noise
-            display_message("Noise Detected!")
+        if volume > THRESHOLD:
+            led_print("Noise!")
 
+        time.sleep(0.1)  # Small delay to prevent overloading the CPU
+
+# Track audio direction and point motor
+try:
+    current_angle = 0  # Track the motor's position
+
+    # Start the audio processing thread
+    audio_thread = Thread(target=audio_processing_thread, daemon=True)
+    audio_thread.start()
+
+    while True:
+        direction = Mic_tuning.direction
         print(f"Audio direction: {direction} degrees")
 
         # Calculate target angle based on direction
         target_angle = 360 - direction  # Flip direction
-        step_count = int((target_angle - current_angle) / 1.8)
+        # Normalize the target angle to within 0-360 degrees
+        target_angle = target_angle % 360
 
-        # Determine rotation direction
-        if step_count > 0:
-            GPIO.output(DIR, CW)
+        # Calculate the difference in angles
+        angle_diff = target_angle - current_angle
+
+        # Ensure angle_diff is between -180 and 180 (shortest path)
+        if angle_diff > 180:
+            angle_diff -= 360
+        elif angle_diff < -180:
+            angle_diff += 360
+
+        # Determine rotation direction (shortest path)
+        if angle_diff > 0:
+            GPIO.output(DIR, CW)  # Clockwise
         else:
-            GPIO.output(DIR, CCW)
+            GPIO.output(DIR, CCW)  # Counterclockwise
 
         # Rotate stepper motor (non-blocking)
-        for _ in range(abs(step_count)):
+        step_count = int(abs(angle_diff) / 1.8)  # Steps per revolution (1.8° per step)
+        for _ in range(step_count):
             GPIO.output(STEP, GPIO.HIGH)
             time.sleep(0.001)
             GPIO.output(STEP, GPIO.LOW)
@@ -107,7 +141,7 @@ try:
         current_angle = target_angle
 
         # Small delay to prevent rapid movement
-        time.sleep(0.1)
+        time.sleep(0.04)
 
 except KeyboardInterrupt:
     print("Exiting program.")
