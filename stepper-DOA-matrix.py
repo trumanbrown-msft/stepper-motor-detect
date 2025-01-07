@@ -46,7 +46,7 @@ chunk = 24000  # Chunk size (1.5 seconds)
 overlap = 18000  # 75% overlap (1.125 seconds overlap)
 channels = 1  # Mono audio
 format = pyaudio.paInt16
-THRESHOLD = 10 # Volume threshold for noise detection
+THRESHOLD = 30 # Volume threshold for noise detection
 
 # Open the audio stream
 stream = p.open(format=format,
@@ -141,7 +141,7 @@ try:
         current_angle = target_angle
 
         # Small delay to prevent rapid movement
-        time.sleep(0.04)
+        time.sleep(0.06)
 
 except KeyboardInterrupt:
     print("Exiting program.")
